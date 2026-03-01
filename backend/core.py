@@ -44,13 +44,13 @@ except ImportError:
 # ── Unified AI Engine — 3-Layer Fallback ─────────────────────────
 def _rule_based_fallback(prompt: str) -> str:
     """
-    Layer 3: Pure Python rule engine.
-    No AI needed. Analyzes inventory data directly and returns advice.
-    Used when both Gemini and Ollama are unavailable.
+    Layer 3: Pure Python rule engine. Uses current inventory from session state (live), not hardcoded.
+    No AI needed. Analyzes inventory by calling calculate_reorder per SKU.
     """
     lines = ["[Offline Rule Engine - No AI available]\n"]
+    inv = _get_inventory()
     critical, low, ok, over = [], [], [], []
-    for sku in INVENTORY:
+    for sku in inv:
         r = calculate_reorder(sku)
         urgency = r.get("urgency","")
         if urgency == "URGENT":     critical.append(sku)
@@ -68,8 +68,8 @@ def _rule_based_fallback(prompt: str) -> str:
         lines.append(f"Healthy: {', '.join(ok)}")
 
     total_val = sum(
-        calculate_reorder(s)["recommended_qty"] * INVENTORY[s]["unit_price"]
-        for s in INVENTORY if calculate_reorder(s)["recommended_qty"] > 0
+        calculate_reorder(s)["recommended_qty"] * inv[s]["unit_price"]
+        for s in inv if calculate_reorder(s)["recommended_qty"] > 0
     )
     lines.append(f"Total recommended reorder value: ${total_val:,.2f}")
     lines.append("Recommendation: Process critical items first, then low-stock items.")
@@ -78,21 +78,46 @@ def _rule_based_fallback(prompt: str) -> str:
 def ai_call(prompt: str, image=None) -> str:
     """
     3-layer fallback AI engine:
-    Layer 1 — Gemini (cloud, best quality)
-    Layer 2 — Ollama Gemma3 (local, offline)
+    Layer 1 — Gemini (cloud) / API Server (local)
+    Layer 2 — Ollama Gemma3 (local)
     Layer 3 — Rule engine (pure Python, always works)
     """
     mode = st.session_state.get("ai_mode", "gemini")
     ai_log = st.session_state.setdefault("ai_call_log", [])
 
-    # ── Layer 1: Gemini ──
+    # ── API Server (api_server.py 独立进程，POST /api/chat) ──
+    if mode == "api_server":
+        base_url = (st.session_state.get("api_server_url") or "http://127.0.0.1:8000").strip().rstrip("/")
+        try:
+            data = json.dumps({"message": prompt}).encode("utf-8")
+            req = urllib.request.Request(
+                base_url + "/api/chat",
+                data=data,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                body = json.loads(resp.read().decode())
+                reply = (body.get("reply") or "").strip()
+            if reply:
+                ai_log.append({"time": datetime.now().strftime("%H:%M:%S"), "layer": "API Server 🌐", "status": "OK"})
+                return reply
+        except Exception as e:
+            ai_log.append({"time": datetime.now().strftime("%H:%M:%S"), "layer": "API Server 🌐", "status": f"FAILED: {e}"})
+            st.toast("⚠️ API Server 未启动或不可达 — 请先运行 python api_server.py", icon="⚠️")
+
+    # ── Layer 1: Gemini (supports cloud-trained Tuned Model for best results) ──
     if mode == "gemini":
         api_key = st.session_state.get("api_key", "")
         if api_key:
             try:
                 client = genai.Client(api_key=api_key)
                 contents = [image, prompt] if image else prompt
-                resp = client.models.generate_content(model="gemini-2.5-flash", contents=contents)
+                # If cloud-trained model ID is set (after AI Studio fine-tune), use it
+                model_id = (st.session_state.get("cloud_tuned_model_id") or "").strip()
+                if not model_id:
+                    model_id = "gemini-2.5-flash"
+                resp = client.models.generate_content(model=model_id, contents=contents)
                 ai_log.append({"time": datetime.now().strftime("%H:%M:%S"), "layer": "Gemini ☁️", "status": "OK"})
                 return resp.text
             except Exception as e:
@@ -496,9 +521,21 @@ DELIVERIES = {
     },
 }
 
+
+def _get_inventory():
+    """Current inventory from session state (live) when in app; else module default. Use this so logic uses live data, not hardcoded."""
+    try:
+        inv = st.session_state.get("live_inventory")
+        if inv is not None and isinstance(inv, dict) and len(inv) > 0:
+            return inv
+    except Exception:
+        pass
+    return INVENTORY
+
+
 # ── Logic Functions ───────────────────────────────────────────────
 def get_total_capacity_used():
-    return sum(v["current_stock"] * v["unit_volume"] for v in INVENTORY.values())
+    return sum(v["current_stock"] * v["unit_volume"] for v in _get_inventory().values())
 
 def check_network() -> bool:
     """Check if internet is available. Cached for 60 seconds."""
@@ -520,10 +557,9 @@ def check_network() -> bool:
 
 def fetch_supply_chain_news(sku: str) -> str:
     """
-    Search for supply chain news relevant to this SKU.
-    Returns news summary or empty string if offline.
+    Search for supply chain news relevant to this SKU. Uses current inventory from session state.
     """
-    item = INVENTORY.get(sku, {})
+    item = _get_inventory().get(sku, {})
     supplier = item.get("supplier", "")
     name = item.get("name", "")
 
@@ -553,11 +589,9 @@ def fetch_supply_chain_news(sku: str) -> str:
 
 def forecast_demand(sku: str, use_news: bool = True):
     """
-    Demand forecast with optional web news signal.
-    - Online: weighted moving avg + trend + AI news analysis
-    - Offline: weighted moving avg + trend only
+    Demand forecast with optional web news signal. Uses current inventory from session state (live).
     """
-    item = INVENTORY.get(sku)
+    item = _get_inventory().get(sku)
     if not item:
         return {"daily_avg": 0, "trend_pct": 0, "demand_level": "UNKNOWN",
                 "forecast_7d": 0, "forecast_14d": 0, "news_signal": 0, "news_summary": "", "online": False}
@@ -622,7 +656,8 @@ If no relevant news, return {{"signal": 0, "reason": "No significant supply chai
     }
 
 def calculate_reorder(sku):
-    item = INVENTORY.get(sku)
+    """Uses current inventory from session state (live)."""
+    item = _get_inventory().get(sku)
     if not item: return {}
     f = forecast_demand(sku)
     daily = f["daily_avg"]
@@ -659,7 +694,7 @@ def calculate_reorder(sku):
     }
 
 def generate_reorder_email(sku, qty):
-    item = INVENTORY[sku]
+    item = _get_inventory().get(sku) or INVENTORY.get(sku)
     r = calculate_reorder(sku)
     return f"""TO: {item['contact']}
 SUBJECT: Replenishment Order — {sku} ({item['name']})

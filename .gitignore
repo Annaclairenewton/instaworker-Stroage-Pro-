@@ -1,0 +1,35 @@
+# --- Python 相关 ---
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+.pytest_cache/
+backend/__pycache__/
+
+final_gemma_model/
+*.safetensors
+*.bin
+
+# --- 前端 (React/Vue) 相关 ---
+node_modules/
+.pnp
+.pnp.js
+dist/
+build/
+.DS_Store
+
+# --- IDE & 日志 ---
+.vscode/
+.idea/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# --- 大文件 (AI/数据) ---
+*.pth
+*.bin
+*.h5
+*.csv
+*.jsonl

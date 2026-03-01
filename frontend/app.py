@@ -73,9 +73,11 @@ if "sales_orders"  not in st.session_state:
     }
 
 # ── AI ──
-if "api_key"      not in st.session_state: st.session_state.api_key      = ""
-if "ai_mode"      not in st.session_state: st.session_state.ai_mode      = "gemini"
-if "ai_call_log"  not in st.session_state: st.session_state.ai_call_log  = []
+if "api_key"                not in st.session_state: st.session_state.api_key                = ""
+if "ai_mode"                not in st.session_state: st.session_state.ai_mode                = "gemini"
+if "api_server_url"         not in st.session_state: st.session_state.api_server_url         = "http://127.0.0.1:8000"
+if "ai_call_log"            not in st.session_state: st.session_state.ai_call_log            = []
+if "cloud_tuned_model_id"   not in st.session_state: st.session_state.cloud_tuned_model_id   = ""
 
 # ── Inventory — persists across refreshes ──
 if "live_inventory" not in st.session_state:
@@ -246,9 +248,9 @@ with st.sidebar:
     st.markdown("**🤖 AI Engine**")
     ai_mode = st.radio(
         "Mode",
-        ["gemini", "ollama"],
-        format_func=lambda x: "☁️ Gemini (Cloud)" if x == "gemini" else "🔒 Gemma Local (Offline)",
-        index=0 if st.session_state.ai_mode == "gemini" else 1,
+        ["gemini", "api_server", "ollama"],
+        format_func=lambda x: {"gemini": "☁️ Gemini", "api_server": "🌐 API Server", "ollama": "🔒 Ollama"}.get(x, x),
+        index=["gemini", "api_server", "ollama"].index(st.session_state.ai_mode) if st.session_state.ai_mode in ("gemini", "api_server", "ollama") else 0,
         horizontal=True,
         label_visibility="collapsed"
     )
@@ -256,13 +258,19 @@ with st.sidebar:
 
     if ai_mode == "gemini":
         st.caption("☁️ Cloud · Requires internet")
+    elif ai_mode == "api_server":
+        url = st.text_input("API 地址", value=st.session_state.api_server_url, placeholder="http://127.0.0.1:8000", key="api_server_url_input")
+        if url: st.session_state.api_server_url = url.strip().rstrip("/")
+        st.caption("🌐 需先运行: python api_server.py")
     else:
         status_color = "🟢" if OLLAMA_AVAILABLE else "🔴"
         st.caption(f"{status_color} Offline · No data leaves device")
 
-        # Model selector for Gemma family
+        # Model selector for Gemma family + custom (e.g. fine-tuned from zip)
         if "ollama_model" not in st.session_state:
             st.session_state.ollama_model = "gemma3"
+        if "ollama_custom_model" not in st.session_state:
+            st.session_state.ollama_custom_model = ""
         gemma_models = {
             "gemma3": "Gemma3 4B (Fast ⚡)",
             "gemma3:12b": "Gemma3 12B (Smart 🧠)",
@@ -276,9 +284,21 @@ with st.sidebar:
             index=list(gemma_models.keys()).index(st.session_state.ollama_model) if st.session_state.ollama_model in gemma_models else 0,
             key="model_selector"
         )
-        st.session_state.ollama_model = selected_model
+        custom_name = st.text_input(
+            "Or use fine-tuned model (from zip):",
+            value=st.session_state.ollama_custom_model or "",
+            placeholder="e.g. warehouse-assistant (after ollama create)",
+            key="ollama_custom_model_input"
+        )
+        if custom_name is not None:
+            st.session_state.ollama_custom_model = (custom_name or "").strip()
+        if st.session_state.ollama_custom_model:
+            st.session_state.ollama_model = st.session_state.ollama_custom_model
+            st.caption("Using custom model: " + st.session_state.ollama_custom_model)
+        else:
+            st.session_state.ollama_model = selected_model
 
-        # Quick pull button
+        # Quick pull button (only for preset models)
         if st.button(f"📥 Pull {selected_model}", use_container_width=True, key="pull_model"):
             with st.spinner(f"Downloading {selected_model}..."):
                 import subprocess
@@ -292,6 +312,10 @@ with st.sidebar:
     if st.session_state.role == "manager" and ai_mode == "gemini":
         new_key = st.text_input("API Key", type="password", value=st.session_state.api_key)
         if new_key: st.session_state.api_key = new_key
+        tuned_id = st.text_input("Cloud-trained model ID (optional)", value=st.session_state.cloud_tuned_model_id, placeholder="e.g. tunedModels/xxx or leave blank for default")
+        if tuned_id is not None: st.session_state.cloud_tuned_model_id = tuned_id
+        if st.session_state.cloud_tuned_model_id:
+            st.caption("✅ Using cloud-trained model for best results. See docs/CLOUD_TRAINING.md")
 
     st.caption("InstaWorker™ Pro v5")
     st.caption("Edge-Native · Secure · Offline-Ready")
@@ -585,6 +609,12 @@ Data: {json.dumps(summary)}"""
 CB-1201-A,Circuit Breaker 20A,45,45.0,A-03-02,Eaton Corporation,john@eaton.com,50,500
 SW-4400-B,Safety Switch 60A,180,120.0,A-05-01,Eaton Corporation,john@eaton.com,20,200"""
             st.download_button("📄 Download CSV Template", template_csv, "inventory_template.csv", "text/csv")
+
+            st.divider()
+            st.markdown("**Export for training (no hardcoding):**")
+            st.caption("Download current inventory as JSON. Then: python scripts/generate_training_data.py -o training_data.jsonl --inventory exported_inventory.json")
+            export_json = json.dumps(INVENTORY, indent=2, ensure_ascii=False)
+            st.download_button("📤 Export inventory JSON (for training)", export_json, "exported_inventory.json", "application/json", key="export_inv_json")
 
         with col_r:
             st.markdown("#### Preview & Import")
